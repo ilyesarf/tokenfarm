@@ -5,39 +5,106 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tokenfarm</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark; --ink: #cfe3c0; --dim: #8fa383; --line: #2c3327; --field: #171a15; }
+  body.night { --ink: #9aa8c0; --dim: #6c7891; --line: #232a3d; --field: #12151f; }
   body {
-    margin: 0; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem;
-    height: 100vh; box-sizing: border-box;
-    background: #10120f; color: #cfe3c0;
+    margin: 0; padding: 1.25rem; box-sizing: border-box; height: 100vh;
+    display: grid; grid-template-columns: minmax(0, 1fr) 19rem; gap: 1.25rem;
+    background: #10120f; color: var(--ink);
     font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     transition: background .6s, color .6s;
   }
-  body.night { background: #0a0c14; color: #9aa8c0; }
+  body.night { background: #0a0c14; }
+  main { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+  aside {
+    display: flex; flex-direction: column; gap: .55rem;
+    overflow-y: auto; padding-left: 1.25rem; border-left: 1px solid var(--line);
+  }
   pre { margin: 0; }
-  #farm { color: #a8e063; transition: color .6s; }
+  #farm { color: #a8e063; transition: color .6s; overflow-x: auto; }
   body.night #farm { color: #7f93c4; }
-  #log { flex: 1; overflow-y: auto; white-space: pre-wrap; color: #8fa383; }
-  body.night #log { color: #6c7891; }
+  #log { flex: 1; min-height: 4rem; overflow-y: auto; white-space: pre-wrap; color: var(--dim); }
   #log .tick { opacity: .75; }
   #log .err { color: #e08063; }
-  form { display: flex; gap: .5rem; }
-  input {
-    flex: 1; padding: .5rem; border: 1px solid #2c3327; border-radius: 3px;
-    background: #171a15; color: inherit; font: inherit; outline: none;
+  input, textarea, button {
+    border: 1px solid var(--line); border-radius: 3px;
+    background: var(--field); color: inherit; font: inherit; outline: none;
   }
-  body.night input { border-color: #232a3d; background: #12151f; }
-  input:focus { border-color: currentColor; }
+  input:focus, textarea:focus { border-color: currentColor; }
+  form { display: flex; gap: .5rem; }
+  #cmd { flex: 1; padding: .5rem; }
+
+  #where { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; }
+  #where b { font-weight: normal; }
+  #where span { opacity: .55; font-size: 12px; }
+  .knob { display: flex; flex-direction: column; gap: .15rem; }
+  .knob .head { display: flex; justify-content: space-between; opacity: .75; font-size: 12px; }
+  .knob .head b { font-weight: normal; opacity: 1; color: #a8e063; }
+  body.night .knob .head b { color: #7f93c4; }
+  .knob input[type=range] {
+    width: 100%; height: 1.1rem; padding: 0; border: none; background: none;
+    accent-color: #a8e063; cursor: pointer;
+  }
+  body.night .knob input[type=range] { accent-color: #7f93c4; }
+  .flag { display: flex; justify-content: space-between; align-items: center; font-size: 12px; opacity: .75; }
+  .flag input { accent-color: #a8e063; width: 1rem; height: 1rem; }
+  #seed { width: 6rem; padding: .2rem .35rem; font-size: 12px; }
+  #crops { width: 100%; height: 6rem; padding: .35rem; box-sizing: border-box; font-size: 12px; }
+  .group { margin-top: .5rem; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; opacity: .4; }
+  button { padding: .5rem; cursor: pointer; text-align: center; }
+  button:hover { border-color: currentColor; }
+  button.go { border-color: #a8e063; color: #a8e063; }
+  body.night button.go { border-color: #7f93c4; color: #7f93c4; }
+  #acts { display: flex; flex-direction: column; gap: .4rem; margin-top: .6rem; }
+  #note { font-size: 12px; opacity: .8; min-height: 1.2em; }
+  #note.err { color: #e08063; }
+  #key { padding: .35rem; font-size: 12px; }
+  details { font-size: 12px; opacity: .6; }
+  summary { cursor: pointer; }
+  #rules { white-space: pre-wrap; margin-top: .4rem; }
+  @media (max-width: 800px) {
+    body { grid-template-columns: 1fr; height: auto; }
+    aside { border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 1rem; }
+  }
 </style>
 </head>
 <body>
-  <pre id="farm"></pre>
-  <div id="log"></div>
-  <form id="bar"><input id="cmd" autocomplete="off" autofocus placeholder="type a command, or help"></form>
+  <main>
+    <pre id="farm"></pre>
+    <div id="log"></div>
+    <form id="bar"><input id="cmd" autocomplete="off" autofocus placeholder="type a command, or help"></form>
+  </main>
+
+  <aside>
+    <div id="where"><b id="title">main shared sim</b><span id="tag"></span></div>
+    <div id="knobs"></div>
+    <div class="group">crops</div>
+    <textarea id="crops" spellcheck="false"></textarea>
+    <div id="acts"></div>
+    <div id="note"></div>
+    <input id="key" type="password" placeholder="admin key (if set)" autocomplete="off">
+    <details><summary>how this farm works</summary><pre id="rules"></pre></details>
+  </aside>
+
 <script>
-const farmView = document.getElementById('farm');
-const logView = document.getElementById('log');
-const input = document.getElementById('cmd');
+const SLIDERS = {
+  seconds_per_hour: [0.25, 60, 0.25],
+  start_money: [0, 500, 5],
+  water_hours: [1, 48, 1],
+  thirst_hours: [1, 72, 1],
+  rot_hours: [1, 168, 1],
+  rain_chance: [0, 0.5, 0.01],
+  rain_stops: [0.05, 1, 0.05],
+};
+
+const el = (id) => document.getElementById(id);
+const logView = el('log'), knobs = el('knobs'), cropsBox = el('crops');
+const note = el('note'), acts = el('acts');
+
+let world = 'main';
+let shared = true;
+let baseline = null;
+let source = null;
 let seen = 0;
 
 const write = (text, cls = '') => {
@@ -50,11 +117,6 @@ const write = (text, cls = '') => {
   if (atBottom) logView.scrollTop = logView.scrollHeight;
 };
 
-const draw = (state) => {
-  farmView.textContent = state.ascii;
-  document.body.classList.toggle('night', state.phase === 'night');
-};
-
 const show = (events) => {
   for (const event of events) {
     if (event.id <= seen) continue;
@@ -63,40 +125,197 @@ const show = (events) => {
   }
 };
 
-const consume = async ({ events = [], state }) => {
+const consume = async (payload) => {
+  const { events = [], state } = payload;
+  if (payload.world && payload.world !== world) return;
+  if (state && state.cursor < seen) {
+    seen = 0;
+    logView.replaceChildren();
+  }
   show(events);
   if (!state) return;
-  draw(state);
+  el('farm').textContent = state.ascii;
+  document.body.classList.toggle('night', state.phase === 'night');
   if (state.cursor > seen) {
-    const missed = await fetch(`/api/events?since=${seen}`).then((res) => res.json());
-    show(missed.events);
+    const url = `/api/events?world=${world}&since=${seen}`;
+    show((await fetch(url).then((res) => res.json())).events);
   }
 };
 
-document.getElementById('bar').onsubmit = async (event) => {
+el('bar').onsubmit = async (event) => {
   event.preventDefault();
-  const text = input.value.trim();
+  const text = el('cmd').value.trim();
   if (!text) return;
-  input.value = '';
+  el('cmd').value = '';
   write('> ' + text);
-  const res = await fetch('/api/command?view=human', {
+  const result = await fetch(`/api/command?world=${world}&view=human`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
-  });
-  const result = await res.json();
+  }).then((res) => res.json());
   if (!result.ok) write(result.message, 'err');
   else if (!result.events.length) write(result.message);
   consume(result);
 };
 
-fetch('/api/events?since=0')
-  .then((res) => res.json())
-  .then(({ events, cursor }) => {
-    consume({ events: events.slice(-20) });
-    seen = cursor;
-    new EventSource('/api/stream?view=human').onmessage = (msg) => consume(JSON.parse(msg.data));
+const knob = (name, value, limit) => {
+  const [lo, hi, step] = SLIDERS[name] || [limit[0], limit[1], 1];
+  const box = document.createElement('div');
+  box.className = 'knob';
+  const head = document.createElement('div');
+  head.className = 'head';
+  const readout = document.createElement('b');
+  readout.textContent = value;
+  head.append(Object.assign(document.createElement('span'), { textContent: name.replace(/_/g, ' ') }), readout);
+  const slider = document.createElement('input');
+  Object.assign(slider, {
+    type: 'range', id: 'cfg-' + name, value,
+    min: Math.max(lo, limit[0]), max: Math.min(hi, limit[1]), step,
   });
+  slider.oninput = () => { readout.textContent = slider.value; touched(); };
+  box.append(head, slider);
+  knobs.append(box);
+};
+
+const flag = (name, value) => {
+  const row = document.createElement('label');
+  row.className = 'flag';
+  const box = document.createElement('input');
+  Object.assign(box, { type: 'checkbox', id: 'cfg-' + name, checked: value });
+  box.onchange = touched;
+  row.append(name.replace(/_/g, ' '), box);
+  knobs.append(row);
+};
+
+const seedRow = (value) => {
+  const row = document.createElement('label');
+  row.className = 'flag';
+  const box = document.createElement('input');
+  Object.assign(box, { id: 'seed', type: 'text', value: value ?? '', placeholder: 'random' });
+  box.oninput = touched;
+  row.append('seed', box);
+  knobs.append(row);
+};
+
+const paint = ({ config, limits, rules, world: id, shared: isShared }) => {
+  world = id;
+  shared = isShared;
+  el('title').textContent = isShared ? 'main shared sim' : 'your own sim';
+  el('tag').textContent = isShared ? 'everyone sees this' : id;
+  knobs.replaceChildren();
+  for (const [name, value] of Object.entries(config)) {
+    if (name === 'crops') continue;
+    if (typeof value === 'boolean') flag(name, value);
+    else if (name === 'seed') seedRow(value);
+    else knob(name, value, limits[name]);
+  }
+  cropsBox.value = JSON.stringify(config.crops, null, 1);
+  el('rules').textContent = rules;
+  baseline = JSON.stringify(collect());
+  buttons();
+};
+
+const collect = () => {
+  const values = {};
+  for (const field of knobs.querySelectorAll('input')) {
+    if (field.id === 'seed') {
+      values.seed = field.value.trim() === '' ? null : Number(field.value);
+    } else {
+      const name = field.id.slice(4);
+      values[name] = field.type === 'checkbox' ? field.checked : Number(field.value);
+    }
+  }
+  try {
+    values.crops = JSON.parse(cropsBox.value);
+  } catch (error) {
+    values.crops = null;
+  }
+  return values;
+};
+
+const dirty = () => baseline !== null && JSON.stringify(collect()) !== baseline;
+
+const button = (label, className, action) => {
+  const node = document.createElement('button');
+  node.textContent = label;
+  node.className = className;
+  node.onclick = (event) => { event.preventDefault(); action(); };
+  acts.append(node);
+};
+
+const buttons = () => {
+  acts.replaceChildren();
+  if (shared) {
+    if (dirty()) button('start your own sim', 'go', fork);
+    return;
+  }
+  if (dirty()) button('restart with these settings', 'go', apply);
+  button('restart this sim', '', () => send(`/api/restart?world=${world}`));
+  button('back to the main sim', '', () => enter('main'));
+};
+
+const touched = () => buttons();
+cropsBox.oninput = touched;
+
+const send = async (path, body) => {
+  const values = body === undefined ? undefined : body;
+  if (values && values.crops === null) {
+    note.className = 'err';
+    note.textContent = 'crops is not valid JSON';
+    return null;
+  }
+  note.className = '';
+  note.textContent = 'working...';
+  const key = el('key').value;
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(key && { 'X-Admin-Key': key }) },
+    body: JSON.stringify(values ?? {}),
+  });
+  const result = await res.json();
+  if (!res.ok) {
+    note.className = 'err';
+    note.textContent = result.detail || 'that did not work';
+    return null;
+  }
+  note.textContent = '';
+  return result;
+};
+
+const apply = async () => {
+  const result = await send(`/api/config?world=${world}`, collect());
+  if (result) { paint(result); write('— settings applied, sim restarted —'); }
+};
+
+const fork = async () => {
+  const result = await send('/api/worlds', collect());
+  if (result) await enter(result.world, result);
+};
+
+const enter = async (id, known) => {
+  if (source) source.close();
+  world = id;
+  seen = 0;
+  logView.replaceChildren();
+  const data = known || (await fetch(`/api/config?world=${id}`, { headers: keyHeader() })
+    .then((res) => (res.ok ? res.json() : null)));
+  if (data) paint(data);
+  const first = await fetch(`/api/events?world=${id}&since=0`).then((res) => res.json());
+  show(first.events.slice(-20));
+  seen = first.cursor;
+  write(id === 'main' ? '— main shared sim —' : '— your own sim, nobody else is watching —');
+  source = new EventSource(`/api/stream?world=${id}&view=human`);
+  source.onmessage = (msg) => consume(JSON.parse(msg.data));
+};
+
+const keyHeader = () => {
+  const key = el('key').value;
+  return key ? { 'X-Admin-Key': key } : {};
+};
+
+el('key').onchange = () => enter(world);
+
+enter('main');
 </script>
 </body>
 </html>
