@@ -1,1 +1,85 @@
 A farm for an LLM farmer.
+
+The world runs on its own clock. Time passes, weather happens, crops ripen
+and rot whether or not anyone is connected.
+
+Two views of the same world
+    The agent is a person who has never farmed. It sees only what a person
+    standing in the field could see: plants that look small or full grown or
+    ripe, soil that looks damp, a plant that looks unwell. It is told nothing
+    about water, daylight, thirst or rot. It has to work that out.
+
+    The human gets the instruments: exact hours of growth left, hours until
+    a ripe crop spoils, moisture level, thirst counter.
+
+    Pass ?view=human on the read routes for the instrumented view. Everything
+    below under "Rules" is knowledge the agent does not start with -- keep it
+    out of any system prompt you hand the model.
+
+Run
+    pip install -r requirements.txt
+    uvicorn main:app
+    open http://localhost:8000
+
+    TOKENFARM_SECONDS_PER_HOUR=5   real seconds per in-game hour (default 5,
+                                   so a day is 2 minutes)
+
+Files
+    farm.py     simulation, hourly tick, command parsing, both views
+    main.py     FastAPI app: clock task, 5 routes
+    index.html  instrumented ascii view + live event log + command bar
+
+API
+    GET  /api/state[?view=human]   -> state
+    GET  /api/events?since=<id>    -> {events, cursor}  what happened while away
+    GET  /api/stream[?view=human]  -> SSE {events, state} on every tick
+    POST /api/command {"text"}     -> {ok, message, events, state}
+                     [?view=human]
+
+    state = {day, time, phase, weather, money, barn, crops, plots, ascii,
+             cursor, revision}
+    plots, agent view = {"A1": {crop, looks, damp}, ...}
+    plots, human view = {"A1": {crop, state, hours_left, rots_in, moisture,
+                                thirst}, ...}
+
+    cursor is the id of the newest event; keep it between turns and pass it
+    to /api/events to replay exactly what was missed. revision changes on any
+    mutation, so an agent can tell "nothing happened" cheaply.
+
+    Events are observations, never explanations: "A3 shrivelled up", not
+    "A3 died of thirst". Both views share them.
+
+Commands (send "help" for the in-game version)
+    look | till <plots> | plant <crop> <plots> | water <plots>
+    harvest <plots> | clear <plots> | sell <crop|all> [n] | log [n] | reset
+
+    <plots> accepts a cell (a1), a rectangle (a1-b3), "all", or a mix.
+    There is no "wait" -- nobody can fast-forward a shared clock. Call
+    sim.tick(farm) directly to drive the world synchronously in tests.
+
+    "look" always renders the farmer's-eye view, so you can see what the
+    model sees. The browser pane is the instrumented one.
+
+Grid
+    agent    .  bare   -  tilled   x  dead   ~  damp   !  looks unwell
+             w1 w2 w3  sprout / half grown / nearly full grown
+             W         looks ripe
+
+    human    w14  14 growing hours left      W46  ripe, spoils in 46h
+             ~    damp                       !5   5 hours thirsty
+
+Rules -- SPOILERS, this is what the agent must discover
+    06:00 dawn, 20:00 dusk. In daylight crops grow one hour per hour on moist
+    soil, and soil dries one hour per hour. At night everything pauses, so
+    water poured at dusk is still there at dawn. Rain soaks every tilled plot
+    at any hour. A crop dies after 20 thirsty hours, and a ripe crop rots 48
+    hours after it ripens -- an absent farmer loses the harvest. A plant shows
+    "!" halfway to either death, so trouble is visible before it is fatal.
+
+    Crops: wheat $5/20h/$12, corn $12/40h/$30, tomato $20/60h/$55,
+    pumpkin $40/100h/$120. Hours are daylight growing hours.
+    Start with $50. Money is the score.
+
+    Seed and sale prices are posted on the seed board, visible to the agent.
+    Prices are written on signs; biology is not. To hide prices too, drop
+    "price" from the agent branch of _seen/snapshot in farm.py.

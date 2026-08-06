@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tokenfarm</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem;
+    height: 100vh; box-sizing: border-box;
+    background: #10120f; color: #cfe3c0;
+    font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    transition: background .6s, color .6s;
+  }
+  body.night { background: #0a0c14; color: #9aa8c0; }
+  pre { margin: 0; }
+  #farm { color: #a8e063; transition: color .6s; }
+  body.night #farm { color: #7f93c4; }
+  #log { flex: 1; overflow-y: auto; white-space: pre-wrap; color: #8fa383; }
+  body.night #log { color: #6c7891; }
+  #log .tick { opacity: .75; }
+  #log .err { color: #e08063; }
+  form { display: flex; gap: .5rem; }
+  input {
+    flex: 1; padding: .5rem; border: 1px solid #2c3327; border-radius: 3px;
+    background: #171a15; color: inherit; font: inherit; outline: none;
+  }
+  body.night input { border-color: #232a3d; background: #12151f; }
+  input:focus { border-color: currentColor; }
+</style>
+</head>
+<body>
+  <pre id="farm"></pre>
+  <div id="log"></div>
+  <form id="bar"><input id="cmd" autocomplete="off" autofocus placeholder="type a command, or help"></form>
+<script>
+const farmView = document.getElementById('farm');
+const logView = document.getElementById('log');
+const input = document.getElementById('cmd');
+let seen = 0;
+
+const write = (text, cls = '') => {
+  if (!text) return;
+  const atBottom = logView.scrollHeight - logView.scrollTop - logView.clientHeight < 40;
+  const line = document.createElement('div');
+  line.className = cls;
+  line.textContent = text;
+  logView.append(line);
+  if (atBottom) logView.scrollTop = logView.scrollHeight;
+};
+
+const draw = (state) => {
+  farmView.textContent = state.ascii;
+  document.body.classList.toggle('night', state.phase === 'night');
+};
+
+const show = (events) => {
+  for (const event of events) {
+    if (event.id <= seen) continue;
+    seen = event.id;
+    write(`d${event.day} ${event.time}  ${event.text}`, 'tick');
+  }
+};
+
+const consume = async ({ events = [], state }) => {
+  show(events);
+  if (!state) return;
+  draw(state);
+  if (state.cursor > seen) {
+    const missed = await fetch(`/api/events?since=${seen}`).then((res) => res.json());
+    show(missed.events);
+  }
+};
+
+document.getElementById('bar').onsubmit = async (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  write('> ' + text);
+  const res = await fetch('/api/command?view=human', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  const result = await res.json();
+  if (!result.ok) write(result.message, 'err');
+  else if (!result.events.length) write(result.message);
+  consume(result);
+};
+
+fetch('/api/events?since=0')
+  .then((res) => res.json())
+  .then(({ events, cursor }) => {
+    consume({ events: events.slice(-20) });
+    seen = cursor;
+    new EventSource('/api/stream?view=human').onmessage = (msg) => consume(JSON.parse(msg.data));
+  });
+</script>
+</body>
+</html>
