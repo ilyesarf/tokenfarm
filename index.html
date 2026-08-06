@@ -62,6 +62,21 @@
   details { font-size: 12px; opacity: .6; }
   summary { cursor: pointer; }
   #rules { white-space: pre-wrap; margin-top: .4rem; }
+  #veil {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: #000000b0; backdrop-filter: blur(2px); z-index: 10;
+  }
+  #veil.open { display: flex; }
+  #modal {
+    max-width: 24rem; padding: 1.4rem; border: 1px solid #e0a063; border-radius: 4px;
+    background: #16180f; box-shadow: 0 0 40px #0009;
+  }
+  body.night #modal { background: #12141d; }
+  #modal h2 { margin: 0 0 .6rem; font-size: 15px; font-weight: normal; color: #e0a063; }
+  #modal p { margin: 0 0 1.1rem; color: var(--dim); }
+  #modal b { color: var(--ink); }
+  #modal .row { display: flex; gap: .5rem; }
+  #modal button { flex: 1; }
   @media (max-width: 800px) {
     body { grid-template-columns: 1fr; height: auto; }
     aside { border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 1rem; }
@@ -86,6 +101,19 @@
     <details><summary>how this farm works</summary><pre id="rules"></pre></details>
   </aside>
 
+  <div id="veil">
+    <div id="modal">
+      <h2>your sim is about to close</h2>
+      <p>Nothing has changed on this farm for a while, so it expires in
+         <b><span id="left">60</span>s</b>. Keep it open, or head back to the
+         main shared sim.</p>
+      <div class="row">
+        <button class="go" id="keep">keep this sim open</button>
+        <button id="leave">back to the main sim</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 const SLIDERS = {
   seconds_per_hour: [0.25, 60, 0.25],
@@ -101,11 +129,14 @@ const el = (id) => document.getElementById(id);
 const logView = el('log'), knobs = el('knobs'), cropsBox = el('crops');
 const note = el('note'), acts = el('acts');
 
+const WARN_AT = 60;
+
 let world = 'main';
 let shared = true;
 let baseline = null;
 let source = null;
 let seen = 0;
+let expiresIn = null;
 
 const write = (text, cls = '') => {
   if (!text) return;
@@ -125,9 +156,34 @@ const show = (events) => {
   }
 };
 
+const gauge = () => {
+  const due = expiresIn !== null && expiresIn <= WARN_AT && world !== 'main';
+  el('veil').classList.toggle('open', due);
+  if (due) el('left').textContent = expiresIn;
+};
+
+const setLife = (value) => {
+  expiresIn = value === undefined ? expiresIn : value;
+  gauge();
+};
+
+setInterval(() => {
+  if (expiresIn === null) return;
+  expiresIn = Math.max(0, expiresIn - 1);
+  gauge();
+}, 1000);
+
 const consume = async (payload) => {
   const { events = [], state } = payload;
   if (payload.world && payload.world !== world) return;
+  if (payload.gone) {
+    el('veil').classList.remove('open');
+    expiresIn = null;
+    await enter('main');
+    write('— your sim expired and was closed —', 'err');
+    return;
+  }
+  setLife(payload.expires_in);
   if (state && state.cursor < seen) {
     seen = 0;
     logView.replaceChildren();
@@ -197,9 +253,10 @@ const seedRow = (value) => {
   knobs.append(row);
 };
 
-const paint = ({ config, limits, rules, world: id, shared: isShared }) => {
+const paint = ({ config, limits, rules, world: id, shared: isShared, expires_in }) => {
   world = id;
   shared = isShared;
+  setLife(expires_in);
   el('title').textContent = isShared ? 'main shared sim' : 'your own sim';
   el('tag').textContent = isShared ? 'everyone sees this' : id;
   knobs.replaceChildren();
@@ -296,6 +353,8 @@ const enter = async (id, known) => {
   if (source) source.close();
   world = id;
   seen = 0;
+  expiresIn = null;
+  gauge();
   logView.replaceChildren();
   const data = known || (await fetch(`/api/config?world=${id}`, { headers: keyHeader() })
     .then((res) => (res.ok ? res.json() : null)));
@@ -311,6 +370,19 @@ const enter = async (id, known) => {
 const keyHeader = () => {
   const key = el('key').value;
   return key ? { 'X-Admin-Key': key } : {};
+};
+
+el('keep').onclick = async () => {
+  const result = await send(`/api/keepalive?world=${world}`);
+  if (result) {
+    setLife(result.expires_in);
+    write('— sim kept open —');
+  }
+};
+
+el('leave').onclick = () => {
+  el('veil').classList.remove('open');
+  enter('main');
 };
 
 el('key').onchange = () => enter(world);

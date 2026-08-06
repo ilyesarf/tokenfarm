@@ -24,10 +24,24 @@ Many worlds
     Drag any slider in the sidebar and a "start your own sim" button appears.
     That forks a private world with those settings, running its own clock,
     which you can retune and restart as often as you like without touching
-    main. "back to the main sim" returns you. A private sim is dropped after
-    30 idle minutes with nobody watching; at most 24 exist at once.
+    main. "back to the main sim" returns you.
 
     Every play and read route takes ?world=<id>, defaulting to main.
+
+Private sims expire
+    A private sim closes 5 minutes after the last thing that actually changed
+    it. Only a delta counts: planting, watering, harvesting, a restart, a
+    settings change. Looking, streaming and failed commands do not, so an
+    abandoned tab cannot hold a world open forever. At most 24 exist at once.
+
+    A sweep runs every 5 seconds, independent of any world's clock speed, so
+    a sim set to one tick per hour still expires on time. From 60 seconds out
+    the server pushes a countdown on that world's stream and the page raises
+    a modal: keep the sim open, or go back to main. At zero the world is
+    dropped, subscribers get {"world", "gone": true}, and the stream closes.
+
+    POST /api/keepalive?world=<id> resets the 5 minutes without changing
+    anything. main never expires and always reports expires_in: null.
 
 Run
     pip install -r requirements.txt
@@ -43,8 +57,9 @@ Run
 
 Files
     farm.py     config, simulation, hourly tick, commands, both views
-    main.py     FastAPI app: one clock task per world, 9 routes
+    main.py     FastAPI app: one clock task per world, 10 routes
     index.html  ascii view, live log, command bar, slider sidebar
+    STYLE.md    how to write code here. Read it before editing.
 
 Settings
     pace        seconds_per_hour   real seconds per in-game hour
@@ -79,13 +94,19 @@ API
     GET  /api/stream?world=&view=     -> SSE {world, events, state} per tick
     POST /api/command?world=&view=    -> {ok, message, events, state}
                      {"text": "..."}
-    GET  /api/config?world=           -> {world, shared, config, limits, rules}
+    GET  /api/config?world=           -> {world, shared, expires_in, config,
+                                          limits, rules}
     POST /api/worlds {settings}       -> same, for a brand new private sim
     POST /api/config?world= {settings}-> same, applied to that sim, restarted
     POST /api/restart?world= {}       -> same, same settings, from day 1
+    POST /api/keepalive?world= {}     -> same, session clock reset
 
-    The last four need X-Admin-Key when TOKENFARM_ADMIN_KEY is set. The play
+    The last five need X-Admin-Key when TOKENFARM_ADMIN_KEY is set. The play
     routes never do.
+
+    Stream frames are {world, events, state, expires_in}. A countdown frame
+    carries only {world, expires_in}; the last frame of a dying world is
+    {world, gone: true}.
 
     state = {day, time, phase, weather, money, barn, crops, plots, ascii,
              cursor, revision}

@@ -14,7 +14,9 @@ from pydantic import BaseModel
 import farm as sim
 
 MAIN = "main"
-WORLD_TTL = 1800
+SESSION_TTL = 300
+WARN_AT = 60
+SWEEP = 5
 MAX_WORLDS = 24
 
 ADMIN_KEY = os.getenv("TOKENFARM_ADMIN_KEY")
@@ -29,7 +31,7 @@ SUBSCRIBERS = {}
 class World:
     farm: sim.Farm
     ticker: asyncio.Task = None
-    touched: float = field(default_factory=time.monotonic)
+    active: float = field(default_factory=time.monotonic)
 
 
 WORLDS = {}
@@ -45,27 +47,42 @@ def pick(world_id):
     world = WORLDS.get(world_id)
     if world is None:
         raise HTTPException(404, "that sim is gone")
-    world.touched = time.monotonic()
     return world
 
 
-def watched(world_id):
-    return any(wid == world_id for wid, _ in SUBSCRIBERS.values())
+def act(world_id):
+    WORLDS[world_id].active = time.monotonic()
+
+
+def life_left(world_id):
+    world = WORLDS.get(world_id)
+    if world_id == MAIN or world is None:
+        return None
+    return max(0, round(SESSION_TTL - (time.monotonic() - world.active)))
+
+
+def deliver(world_id, choose):
+    for queue, (wid, detail) in list(SUBSCRIBERS.items()):
+        if wid != world_id:
+            continue
+        if queue.full():
+            queue.get_nowait()
+        queue.put_nowait(choose(detail))
 
 
 def publish(world_id, cursor):
     farm = WORLDS[world_id].farm
     events = sim.since(farm, cursor)
     payloads = {
-        detail: {"world": world_id, "events": events, "state": sim.snapshot(farm, detail)}
+        detail: {
+            "world": world_id,
+            "events": events,
+            "state": sim.snapshot(farm, detail),
+            "expires_in": life_left(world_id),
+        }
         for detail in (False, True)
     }
-    for queue, (wid, detail) in list(SUBSCRIBERS.items()):
-        if wid != world_id:
-            continue
-        if queue.full():
-            queue.get_nowait()
-        queue.put_nowait(payloads[detail])
+    deliver(world_id, payloads.__getitem__)
     return payloads
 
 
@@ -85,19 +102,32 @@ async def clock(world_id):
             world = WORLDS.get(world_id)
             if world is None:
                 return
-            idle = time.monotonic() - world.touched > WORLD_TTL
-            if world_id != MAIN and idle and not watched(world_id):
-                del WORLDS[world_id]
-                return
             cursor = world.farm.cursor
             sim.tick(world.farm)
             publish(world_id, cursor)
 
 
+async def janitor():
+    while True:
+        await asyncio.sleep(SWEEP)
+        async with LOCK:
+            for world_id in [name for name in WORLDS if name != MAIN]:
+                left = life_left(world_id)
+                if left:
+                    if left <= WARN_AT:
+                        deliver(world_id, lambda _: {"world": world_id, "expires_in": left})
+                    continue
+                WORLDS.pop(world_id).ticker.cancel()
+                deliver(world_id, lambda _: {"world": world_id, "gone": True})
+                deliver(world_id, lambda _: None)
+
+
 @asynccontextmanager
 async def lifespan(app):
     spawn(MAIN, sim.configure({"seconds_per_hour": PACE}))
+    sweeper = asyncio.create_task(janitor())
     yield
+    sweeper.cancel()
     for world in WORLDS.values():
         world.ticker.cancel()
 
@@ -126,6 +156,7 @@ def settings(world_id):
     return {
         "world": world_id,
         "shared": world_id == MAIN,
+        "expires_in": life_left(world_id),
         "config": asdict(farm.cfg),
         "limits": sim.LIMITS,
         "rules": sim.rules(farm.cfg),
@@ -154,8 +185,10 @@ async def events(world: str = MAIN, since: int = 0):
 async def command(payload: Command, world: str = MAIN, view: str = "agent"):
     async with LOCK:
         farm = pick(world).farm
-        cursor = farm.cursor
+        cursor, revision = farm.cursor, farm.revision
         ok, message = sim.run(farm, payload.text)
+        if farm.revision != revision:
+            act(world)
         return {"ok": ok, "message": message, **publish(world, cursor)[view == "human"]}
 
 
@@ -185,6 +218,7 @@ async def write_config(values: dict, world: str = MAIN, x_admin_key: str = Heade
     config = build(values)
     async with LOCK:
         pick(world).farm = sim.Farm(config)
+        act(world)
         publish(world, 0)
         return settings(world)
 
@@ -194,7 +228,17 @@ async def restart(world: str = MAIN, x_admin_key: str = Header(None)):
     admin(x_admin_key)
     async with LOCK:
         pick(world).farm.reset()
+        act(world)
         publish(world, 0)
+        return settings(world)
+
+
+@app.post("/api/keepalive")
+async def keepalive(world: str = MAIN, x_admin_key: str = Header(None)):
+    admin(x_admin_key)
+    async with LOCK:
+        pick(world)
+        act(world)
         return settings(world)
 
 
@@ -208,10 +252,18 @@ async def stream(world: str = MAIN, view: str = "agent"):
             async with LOCK:
                 farm = pick(world).farm
                 SUBSCRIBERS[queue] = (world, detail)
-                opening = {"world": world, "events": [], "state": sim.snapshot(farm, detail)}
+                opening = {
+                    "world": world,
+                    "events": [],
+                    "state": sim.snapshot(farm, detail),
+                    "expires_in": life_left(world),
+                }
             yield f"data: {json.dumps(opening)}\n\n"
             while True:
-                yield f"data: {json.dumps(await queue.get())}\n\n"
+                payload = await queue.get()
+                if payload is None:
+                    return
+                yield f"data: {json.dumps(payload)}\n\n"
         finally:
             SUBSCRIBERS.pop(queue, None)
 
