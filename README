@@ -60,6 +60,7 @@ Files
     main.py     FastAPI app: one clock task per world, 10 routes
     index.html  ascii view, live log, command bar, slider sidebar
     STYLE.md    how to write code here. Read it before editing.
+                General-purpose; copy it into any repo.
 
 Settings
     pace        seconds_per_hour   real seconds per in-game hour
