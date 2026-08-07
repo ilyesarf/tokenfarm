@@ -1,0 +1,7 @@
+.git
+__pycache__
+*.pyc
+.swp
+README
+STYLE.md
+AGENTS.md

@@ -1,0 +1,8 @@
+services:
+  tokenfarm:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      TOKENFARM_SECONDS_PER_HOUR: ${TOKENFARM_SECONDS_PER_HOUR:-5}
+      TOKENFARM_ADMIN_KEY: ${TOKENFARM_ADMIN_KEY:-}
