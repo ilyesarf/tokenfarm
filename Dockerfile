@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY farm.py main.py index.html ./
+COPY farm.py main.py db.py index.html ./
 
 EXPOSE 8000
 

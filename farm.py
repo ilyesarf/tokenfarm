@@ -212,6 +212,20 @@ class Plot:
         self.crop, self.growth, self.thirst, self.ripe, self.dead = "", 0, 0, 0, False
 
 
+PLOT_FIELDS = ("tilled", "crop", "growth", "moisture", "thirst", "ripe", "dead")
+
+
+def _dump_plot(plot):
+    return {name: getattr(plot, name) for name in PLOT_FIELDS}
+
+
+def _load_plot(cfg, data):
+    plot = Plot(cfg)
+    for name in PLOT_FIELDS:
+        setattr(plot, name, data[name])
+    return plot
+
+
 class Farm:
     def __init__(self, config=None):
         self.cfg = config or Config()
@@ -248,6 +262,37 @@ class Farm:
     @property
     def weather(self):
         return "rain" if self.raining else "clear"
+
+
+def dump(farm):
+    version, internal_state, gauss_next = farm.rng.getstate()
+    return {
+        "cfg": asdict(farm.cfg),
+        "revision": farm.revision,
+        "rng_state": [version, internal_state, gauss_next],
+        "hour": farm.hour,
+        "raining": farm.raining,
+        "money": farm.money,
+        "plots": {label: _dump_plot(plot) for label, plot in farm.plots.items()},
+        "inventory": farm.inventory,
+        "log": list(farm.log),
+        "cursor": farm.cursor,
+    }
+
+
+def load(data):
+    farm = Farm(Config(**data["cfg"]))
+    version, internal_state, gauss_next = data["rng_state"]
+    farm.rng.setstate((version, tuple(internal_state), gauss_next))
+    farm.revision = data["revision"]
+    farm.hour = data["hour"]
+    farm.raining = data["raining"]
+    farm.money = data["money"]
+    farm.plots = {label: _load_plot(farm.cfg, plot) for label, plot in data["plots"].items()}
+    farm.inventory = data["inventory"]
+    farm.log = deque(data["log"], maxlen=LOG_LIMIT)
+    farm.cursor = data["cursor"]
+    return farm
 
 
 def _note(farm, text):

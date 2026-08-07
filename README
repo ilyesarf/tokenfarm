@@ -58,9 +58,18 @@ Run
 Files
     farm.py     config, simulation, hourly tick, commands, both views
     main.py     FastAPI app: one clock task per world, 10 routes
+    db.py       sqlite storage, one row per world, keyed by world id
     index.html  ascii view, live log, command bar, slider sidebar
     STYLE.md    how to write code here. Read it before editing.
                 General-purpose; copy it into any repo.
+
+Persistence
+    Every world (main and private) is written to data/tokenfarm.db on every
+    tick and every command that changes something, and reloaded from there
+    on startup -- a restart resumes every sim exactly where it left off,
+    including the weather RNG. A private sim's 5-minute expiry clock is not
+    persisted, so one that survives a restart gets a fresh countdown. A sim
+    dropped by the janitor is deleted from the db in the same sweep.
 
 Settings
     pace        seconds_per_hour   real seconds per in-game hour

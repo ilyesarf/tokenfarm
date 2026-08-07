@@ -11,6 +11,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+import db
 import farm as sim
 
 MAIN = "main"
@@ -40,7 +41,18 @@ WORLDS = {}
 def spawn(world_id, config):
     WORLDS[world_id] = World(sim.Farm(config))
     WORLDS[world_id].ticker = asyncio.create_task(clock(world_id))
+    save(world_id)
     return WORLDS[world_id]
+
+
+def restore(world_id, blob):
+    WORLDS[world_id] = World(sim.load(json.loads(blob)))
+    WORLDS[world_id].ticker = asyncio.create_task(clock(world_id))
+    return WORLDS[world_id]
+
+
+def save(world_id):
+    db.save(world_id, json.dumps(sim.dump(WORLDS[world_id].farm)))
 
 
 def pick(world_id):
@@ -104,6 +116,7 @@ async def clock(world_id):
                 return
             cursor = world.farm.cursor
             sim.tick(world.farm)
+            save(world_id)
             publish(world_id, cursor)
 
 
@@ -118,13 +131,20 @@ async def janitor():
                         deliver(world_id, lambda _: {"world": world_id, "expires_in": left})
                     continue
                 WORLDS.pop(world_id).ticker.cancel()
+                db.delete(world_id)
                 deliver(world_id, lambda _: {"world": world_id, "gone": True})
                 deliver(world_id, lambda _: None)
 
 
 @asynccontextmanager
 async def lifespan(app):
-    spawn(MAIN, sim.configure({"seconds_per_hour": PACE}))
+    saved = db.load_all()
+    if MAIN in saved:
+        restore(MAIN, saved.pop(MAIN))
+    else:
+        spawn(MAIN, sim.configure({"seconds_per_hour": PACE}))
+    for world_id, blob in saved.items():
+        restore(world_id, blob)
     sweeper = asyncio.create_task(janitor())
     yield
     sweeper.cancel()
@@ -189,6 +209,7 @@ async def command(payload: Command, world: str = MAIN, view: str = "agent"):
         ok, message = sim.run(farm, payload.text)
         if farm.revision != revision:
             act(world)
+            save(world)
         return {"ok": ok, "message": message, **publish(world, cursor)[view == "human"]}
 
 
@@ -219,6 +240,7 @@ async def write_config(values: dict, world: str = MAIN, x_admin_key: str = Heade
     async with LOCK:
         pick(world).farm = sim.Farm(config)
         act(world)
+        save(world)
         publish(world, 0)
         return settings(world)
 
@@ -229,6 +251,7 @@ async def restart(world: str = MAIN, x_admin_key: str = Header(None)):
     async with LOCK:
         pick(world).farm.reset()
         act(world)
+        save(world)
         publish(world, 0)
         return settings(world)
 

@@ -2,6 +2,7 @@
 __pycache__
 *.pyc
 .swp
+data
 README
 STYLE.md
 AGENTS.md
