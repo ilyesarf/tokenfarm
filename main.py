@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
@@ -8,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 import db
@@ -18,10 +19,16 @@ MAIN = "main"
 SESSION_TTL = 300
 WARN_AT = 60
 SWEEP = 5
-MAX_WORLDS = 24
+CLOCK_POLL = 5
+MAX_PRIVATE = 24
+MAX_PUBLIC = 64
+
+NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,23}")
+RESERVED = {"api", "docs", "redoc", "openapi.json"}
 
 ADMIN_KEY = os.getenv("TOKENFARM_ADMIN_KEY")
 PACE = float(os.getenv("TOKENFARM_SECONDS_PER_HOUR", "5"))
+TURN_BASED = os.getenv("TOKENFARM_TURN_BASED", "").lower() in {"1", "true", "yes"}
 INDEX = Path(__file__).parent / "index.html"
 
 LOCK = asyncio.Lock()
@@ -33,26 +40,45 @@ class World:
     farm: sim.Farm
     ticker: asyncio.Task = None
     active: float = field(default_factory=time.monotonic)
+    public: bool = False
 
 
 WORLDS = {}
 
 
-def spawn(world_id, config):
-    WORLDS[world_id] = World(sim.Farm(config))
-    WORLDS[world_id].ticker = asyncio.create_task(clock(world_id))
-    save(world_id)
-    return WORLDS[world_id]
+def spawn(world_id, config, public=False):
+    return install(world_id, World(sim.Farm(config), public=public), store=True)
 
 
-def restore(world_id, blob):
-    WORLDS[world_id] = World(sim.load(json.loads(blob)))
-    WORLDS[world_id].ticker = asyncio.create_task(clock(world_id))
-    return WORLDS[world_id]
+def restore(world_id, blob, public):
+    return install(world_id, World(sim.load(json.loads(blob)), public=public), store=False)
+
+
+def install(world_id, world, store):
+    WORLDS[world_id] = world
+    world.ticker = asyncio.create_task(clock(world_id))
+    if store:
+        save(world_id)
+    return world
+
+
+def rename(world_id, name):
+    world = WORLDS.pop(world_id)
+    world.ticker.cancel()
+    world.public = True
+    db.delete(world_id)
+    install(name, world, store=True)
+    deliver(world_id, lambda _: {"world": world_id, "moved": name})
+    deliver(world_id, lambda _: None)
 
 
 def save(world_id):
-    db.save(world_id, json.dumps(sim.dump(WORLDS[world_id].farm)))
+    world = WORLDS[world_id]
+    db.save(world_id, json.dumps(sim.dump(world.farm)), world.public)
+
+
+def count(public):
+    return sum(1 for world in WORLDS.values() if world.public == public)
 
 
 def pick(world_id):
@@ -68,7 +94,7 @@ def act(world_id):
 
 def life_left(world_id):
     world = WORLDS.get(world_id)
-    if world_id == MAIN or world is None:
+    if world is None or world.public:
         return None
     return max(0, round(SESSION_TTL - (time.monotonic() - world.active)))
 
@@ -104,6 +130,10 @@ async def clock(world_id):
         world = WORLDS.get(world_id)
         if world is None:
             return
+        if world.farm.cfg.turn_based:
+            await asyncio.sleep(CLOCK_POLL)
+            due = time.monotonic()
+            continue
         delay = world.farm.cfg.seconds_per_hour
         due += delay
         now = time.monotonic()
@@ -124,7 +154,7 @@ async def janitor():
     while True:
         await asyncio.sleep(SWEEP)
         async with LOCK:
-            for world_id in [name for name in WORLDS if name != MAIN]:
+            for world_id in [name for name, world in WORLDS.items() if not world.public]:
                 left = life_left(world_id)
                 if left:
                     if left <= WARN_AT:
@@ -138,13 +168,10 @@ async def janitor():
 
 @asynccontextmanager
 async def lifespan(app):
-    saved = db.load_all()
-    if MAIN in saved:
-        restore(MAIN, saved.pop(MAIN))
-    else:
-        spawn(MAIN, sim.configure({"seconds_per_hour": PACE}))
-    for world_id, blob in saved.items():
-        restore(world_id, blob)
+    for world_id, (blob, public) in db.load_all().items():
+        restore(world_id, blob, public)
+    if MAIN not in WORLDS:
+        spawn(MAIN, sim.configure({"seconds_per_hour": PACE, "turn_based": TURN_BASED}), public=True)
     sweeper = asyncio.create_task(janitor())
     yield
     sweeper.cancel()
@@ -157,6 +184,10 @@ app = FastAPI(title="tokenfarm", lifespan=lifespan)
 
 class Command(BaseModel):
     text: str
+
+
+class Naming(BaseModel):
+    name: str
 
 
 def admin(key):
@@ -172,19 +203,29 @@ def build(values):
 
 
 def settings(world_id):
-    farm = WORLDS[world_id].farm
+    world = WORLDS[world_id]
     return {
         "world": world_id,
         "shared": world_id == MAIN,
+        "public": world.public,
         "expires_in": life_left(world_id),
-        "config": asdict(farm.cfg),
+        "config": asdict(world.farm.cfg),
         "limits": sim.LIMITS,
-        "rules": sim.rules(farm.cfg),
+        "rules": sim.rules(world.farm.cfg),
     }
 
 
 @app.get("/")
 async def index():
+    return FileResponse(INDEX)
+
+
+@app.get("/{world_id}")
+async def world_page(world_id: str):
+    if world_id == MAIN:
+        return RedirectResponse("/")
+    if not NAME.fullmatch(world_id):
+        raise HTTPException(404, "no sim by that name")
     return FileResponse(INDEX)
 
 
@@ -226,11 +267,30 @@ async def create_world(values: dict, x_admin_key: str = Header(None)):
     admin(x_admin_key)
     config = build(values)
     async with LOCK:
-        if len(WORLDS) - 1 >= MAX_WORLDS:
+        if count(public=False) >= MAX_PRIVATE:
             raise HTTPException(429, "too many sims running, try again shortly")
         world_id = uuid4().hex[:8]
+        while world_id in WORLDS:
+            world_id = uuid4().hex[:8]
         spawn(world_id, config)
         return settings(world_id)
+
+
+@app.post("/api/publish")
+async def publish_world(payload: Naming, world: str = MAIN, x_admin_key: str = Header(None)):
+    admin(x_admin_key)
+    name = payload.name.strip().lower()
+    async with LOCK:
+        if pick(world).public:
+            raise HTTPException(400, "that sim is already public")
+        if not NAME.fullmatch(name):
+            raise HTTPException(400, "a name is 2-24 characters of a-z, 0-9 and dashes")
+        if name in RESERVED or name in WORLDS:
+            raise HTTPException(409, f"'{name}' is taken, pick another name")
+        if count(public=True) >= MAX_PUBLIC:
+            raise HTTPException(429, "too many public sims, no room for another")
+        rename(world, name)
+        return settings(name)
 
 
 @app.post("/api/config")

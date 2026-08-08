@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 LOG_LIMIT = 400
 LIST_LIMIT = 8
+WAIT_LIMIT = 168
 
 WET = "~"
 SICK = "!"
@@ -53,6 +54,7 @@ class Config:
     stages: int = 3
     show_distress: bool = True
     spoil_rules: bool = False
+    turn_based: bool = False
     crops: dict = field(default_factory=lambda: {n: dict(c) for n, c in DEFAULT_CROPS.items()})
 
     @property
@@ -129,7 +131,7 @@ def configure(values):
         isinstance(merged["seed"], bool) or not isinstance(merged["seed"], int)
     ):
         raise CommandError("seed must be a whole number or null")
-    for flag in ("show_distress", "spoil_rules"):
+    for flag in ("show_distress", "spoil_rules", "turn_based"):
         if not isinstance(merged[flag], bool):
             raise CommandError(f"{flag} must be true or false")
     _check_crops(merged["crops"])
@@ -141,9 +143,10 @@ def rules(cfg):
         f"  {name:<8} costs ${c['cost']}, needs {c['hours']}h of growth, sells for ${c['price']}"
         for name, c in cfg.crops.items()
     ]
+    pace = "time moves only when you wait" if cfg.turn_based else "the clock runs on its own"
     return "\n".join(
         [
-            f"the clock runs on its own: {cfg.dawn:02d}:00 dawn, {cfg.dusk:02d}:00 dusk",
+            f"{pace}: {cfg.dawn:02d}:00 dawn, {cfg.dusk:02d}:00 dusk",
             "crops grow only in daylight on moist soil, and soil dries only in daylight",
             f"watering gives {cfg.water_hours}h of moisture; rain soaks every tilled plot",
             f"a crop dies after {cfg.thirst_hours}h thirsty",
@@ -512,6 +515,15 @@ def cmd_sell(farm, tokens):
     return f"sold {', '.join(sold)} for ${earned}"
 
 
+def cmd_wait(farm, tokens):
+    if not farm.cfg.turn_based:
+        raise CommandError("this world runs on its own clock, nobody can fast-forward it")
+    hours = _number(tokens[0], 1, WAIT_LIMIT) if tokens else 1
+    for _ in range(hours):
+        tick(farm)
+    return f"waited {hours}h"
+
+
 def cmd_log(farm, tokens):
     count = _number(tokens[0], 1, LOG_LIMIT) if tokens else 15
     recent = list(farm.log)[-count:]
@@ -540,6 +552,7 @@ def cmd_help(farm, tokens):
     text = [
         "commands (plots: a1, a1-b3, all)",
         "  look                 look at the farm",
+        *(["  wait [n]             let n hours pass, 1 by default"] if cfg.turn_based else []),
         "  till <plots>         turn the soil",
         "  plant <crop> <plots> sow seeds",
         "  water <plots>        pour water on the soil",
@@ -573,6 +586,7 @@ COMMANDS = {
     "harvest": cmd_harvest,
     "clear": cmd_clear,
     "sell": cmd_sell,
+    "wait": cmd_wait,
     "log": cmd_log,
     "help": cmd_help,
 }

@@ -56,6 +56,7 @@
   button.go { border-color: #a8e063; color: #a8e063; }
   body.night button.go { border-color: #7f93c4; color: #7f93c4; }
   #acts { display: flex; flex-direction: column; gap: .4rem; margin-top: .6rem; }
+  #name { padding: .5rem; font-size: 12px; margin-top: .2rem; }
   #note { font-size: 12px; opacity: .8; min-height: 1.2em; }
   #note.err { color: #e08063; }
   #key { padding: .35rem; font-size: 12px; }
@@ -133,10 +134,19 @@ const WARN_AT = 60;
 
 let world = 'main';
 let shared = true;
+let published = true;
 let baseline = null;
 let source = null;
 let seen = 0;
 let expiresIn = null;
+
+const path = (id) => (id === 'main' ? '/' : '/' + id);
+const fromPath = () => decodeURIComponent(location.pathname.slice(1)) || 'main';
+
+const go = (id, message, cls = '') => {
+  if (message) sessionStorage.setItem('parting', JSON.stringify({ message, cls }));
+  location.assign(path(id));
+};
 
 const write = (text, cls = '') => {
   if (!text) return;
@@ -157,7 +167,7 @@ const show = (events) => {
 };
 
 const gauge = () => {
-  const due = expiresIn !== null && expiresIn <= WARN_AT && world !== 'main';
+  const due = expiresIn !== null && expiresIn <= WARN_AT && !published;
   el('veil').classList.toggle('open', due);
   if (due) el('left').textContent = expiresIn;
 };
@@ -176,11 +186,12 @@ setInterval(() => {
 const consume = async (payload) => {
   const { events = [], state } = payload;
   if (payload.world && payload.world !== world) return;
+  if (payload.moved) {
+    go(payload.moved, `— this sim is public now, at /${payload.moved} —`);
+    return;
+  }
   if (payload.gone) {
-    el('veil').classList.remove('open');
-    expiresIn = null;
-    await enter('main');
-    write('— your sim expired and was closed —', 'err');
+    go('main', '— your sim expired and was closed —', 'err');
     return;
   }
   setLife(payload.expires_in);
@@ -253,11 +264,12 @@ const seedRow = (value) => {
   knobs.append(row);
 };
 
-const paint = ({ config, limits, rules, world: id, shared: isShared, expires_in }) => {
+const paint = ({ config, limits, rules, world: id, shared: isShared, public: isPublic, expires_in }) => {
   world = id;
   shared = isShared;
+  published = isPublic;
   setLife(expires_in);
-  el('title').textContent = isShared ? 'main shared sim' : 'your own sim';
+  el('title').textContent = isShared ? 'main shared sim' : isPublic ? 'a public sim' : 'your own sim';
   el('tag').textContent = isShared ? 'everyone sees this' : id;
   knobs.replaceChildren();
   for (const [name, value] of Object.entries(config)) {
@@ -308,7 +320,14 @@ const buttons = () => {
   }
   if (dirty()) button('restart with these settings', 'go', apply);
   button('restart this sim', '', () => send(`/api/restart?world=${world}`));
-  button('back to the main sim', '', () => enter('main'));
+  if (!published) {
+    const field = document.createElement('input');
+    Object.assign(field, { id: 'name', type: 'text', placeholder: 'name it to go public', autocomplete: 'off' });
+    field.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); publish(); } };
+    acts.append(field);
+    button('publish under this name', '', publish);
+  }
+  button('back to the main sim', '', () => go('main'));
 };
 
 const touched = () => buttons();
@@ -346,23 +365,40 @@ const apply = async () => {
 
 const fork = async () => {
   const result = await send('/api/worlds', collect());
-  if (result) await enter(result.world, result);
+  if (result) go(result.world);
 };
 
-const enter = async (id, known) => {
+const publish = async () => {
+  const name = el('name').value.trim().toLowerCase();
+  if (!name) {
+    note.className = 'err';
+    note.textContent = 'give your sim a name first';
+    return;
+  }
+  const result = await send(`/api/publish?world=${world}`, { name });
+  if (result) go(result.world, `— this sim is public now, at /${result.world} —`);
+};
+
+const enter = async (id) => {
+  const res = await fetch(`/api/config?world=${id}`, { headers: keyHeader() });
+  if (res.status === 404 && id !== 'main') {
+    go('main', `— there is no sim at /${id} —`, 'err');
+    return;
+  }
+  const data = res.ok ? await res.json() : null;
   if (source) source.close();
   world = id;
   seen = 0;
   expiresIn = null;
   gauge();
   logView.replaceChildren();
-  const data = known || (await fetch(`/api/config?world=${id}`, { headers: keyHeader() })
-    .then((res) => (res.ok ? res.json() : null)));
   if (data) paint(data);
   const first = await fetch(`/api/events?world=${id}&since=0`).then((res) => res.json());
   show(first.events.slice(-20));
   seen = first.cursor;
-  write(id === 'main' ? '— main shared sim —' : '— your own sim, nobody else is watching —');
+  write(shared ? '— main shared sim —'
+    : published ? `— a public sim, anyone with the link can play —`
+    : '— your own sim, nobody else is watching —');
   source = new EventSource(`/api/stream?world=${id}&view=human`);
   source.onmessage = (msg) => consume(JSON.parse(msg.data));
 };
@@ -380,14 +416,18 @@ el('keep').onclick = async () => {
   }
 };
 
-el('leave').onclick = () => {
-  el('veil').classList.remove('open');
-  enter('main');
-};
+el('leave').onclick = () => go('main');
 
 el('key').onchange = () => enter(world);
 
-enter('main');
+const parting = sessionStorage.getItem('parting');
+sessionStorage.removeItem('parting');
+
+enter(fromPath()).then(() => {
+  if (!parting) return;
+  const { message, cls } = JSON.parse(parting);
+  write(message, cls);
+});
 </script>
 </body>
 </html>

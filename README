@@ -4,6 +4,12 @@ can lead to Domain Superintelligence. Kinda a long shot, but we'll see!
 The world runs on its own clock. Time passes, weather happens, crops ripen
 and rot whether or not anyone is connected.
 
+Unless you turn that off. A sim set turn_based has no clock of its own and
+moves only when someone says "wait", which is the mode to use when a model
+is playing: it is deciding what to do, not racing an inference budget, and
+a run costs one decision per thing it chooses to do rather than one per
+in-game hour.
+
 Two views of the same world
     The agent is a person who has never farmed. It sees only what a person
     standing in the field could see: plants that look small or full grown or
@@ -18,8 +24,8 @@ Two views of the same world
     out of any system prompt you hand the model.
 
 Many worlds
-    "main" is the shared sim. It is the one the agent lives in, it never
-    expires, and visitors cannot reconfigure it.
+    "main" is the shared sim, at /. It is the one the agent lives in, it
+    never expires, and visitors cannot reconfigure it.
 
     Drag any slider in the sidebar and a "start your own sim" button appears.
     That forks a private world with those settings, running its own clock,
@@ -28,11 +34,35 @@ Many worlds
 
     Every play and read route takes ?world=<id>, defaulting to main.
 
-Private sims expire
+Every sim has a URL
+    / is the main sim and nothing else. Every other sim has its own path,
+    and the browser is sent there rather than staying put:
+
+        fork a sim   -> /<hash>   an unguessable 8-character id, /2ec59022
+        name it      -> /<name>   a public sim, /my-farm
+        back to main -> /
+
+    The URL is the sim. Changing world is a real navigation, not a rewritten
+    address bar, so a reload, a bookmark, a shared link and the back button
+    all land on the sim you were actually in. /main redirects to /.
+
+    Names are 2-24 characters of a-z, 0-9 and dashes, lowercased, and unique
+    across every sim. At most 64 public sims exist.
+
+    Publishing moves the sim: the hash URL stops working and anyone still
+    watching it gets {"world", "moved": <name>} and is sent to the new one.
+    There is no ownership -- a public sim is as editable as main, so the
+    admin key is the only thing between a named sim and a stranger
+    restarting it.
+
+Public sims are permanent, private ones expire
     A private sim closes 5 minutes after the last thing that actually changed
     it. Only a delta counts: planting, watering, harvesting, a restart, a
     settings change. Looking, streaming and failed commands do not, so an
     abandoned tab cannot hold a world open forever. At most 24 exist at once.
+
+    Publishing a sim cancels that clock for good. main is simply the public
+    sim that ships with the server.
 
     A sweep runs every 5 seconds, independent of any world's clock speed, so
     a sim set to one tick per hour still expires on time. From 60 seconds out
@@ -49,6 +79,8 @@ Run
     open http://localhost:8000
 
     TOKENFARM_SECONDS_PER_HOUR=5   starting clock speed for main
+    TOKENFARM_TURN_BASED=true      start main with no clock of its own, for
+                                   pointing a single agent at the server
     TOKENFARM_ADMIN_KEY=...        locks config and sim-forking behind
                                    X-Admin-Key. Unset means anyone who can
                                    reach the server can read the physics --
@@ -58,22 +90,25 @@ Run
 Files
     farm.py     config, simulation, hourly tick, commands, both views
     main.py     FastAPI app: one clock task per world, 10 routes
-    db.py       sqlite storage, one row per world, keyed by world id
+    db.py       sqlite storage, one row per world, keyed by hash or name
     index.html  ascii view, live log, command bar, slider sidebar
     STYLE.md    how to write code here. Read it before editing.
                 General-purpose; copy it into any repo.
 
 Persistence
-    Every world (main and private) is written to data/tokenfarm.db on every
-    tick and every command that changes something, and reloaded from there
-    on startup -- a restart resumes every sim exactly where it left off,
-    including the weather RNG. A private sim's 5-minute expiry clock is not
-    persisted, so one that survives a restart gets a fresh countdown. A sim
-    dropped by the janitor is deleted from the db in the same sweep.
+    Every world is written to data/tokenfarm.db on every tick and every
+    command that changes something, and reloaded from there on startup -- a
+    restart resumes every sim exactly where it left off, including the
+    weather RNG and whether it is public. A private sim's 5-minute expiry
+    clock is not persisted, so one that survives a restart gets a fresh
+    countdown. A sim dropped by the janitor is deleted from the db in the
+    same sweep, as is the old hash row when a sim is published.
 
 Settings
     pace        seconds_per_hour   real seconds per in-game hour
                 seed               blank for random weather, an int to repeat
+                turn_based         no clock of its own; time moves only on
+                                   "wait". seconds_per_hour is then unused
 
     world       rows, cols         size of the field
                 start_money        opening balance
@@ -99,24 +134,30 @@ Settings
                                    against being told
 
 API
+    GET  /                            -> the page, on main
+    GET  /<hash|name>                 -> the page, on that sim. /main is a
+                                         307 back to /; a malformed id 404s
     GET  /api/state?world=&view=      -> state
     GET  /api/events?world=&since=    -> {events, cursor}  what you missed
     GET  /api/stream?world=&view=     -> SSE {world, events, state} per tick
     POST /api/command?world=&view=    -> {ok, message, events, state}
                      {"text": "..."}
-    GET  /api/config?world=           -> {world, shared, expires_in, config,
-                                          limits, rules}
+    GET  /api/config?world=           -> {world, shared, public, expires_in,
+                                          config, limits, rules}
     POST /api/worlds {settings}       -> same, for a brand new private sim
     POST /api/config?world= {settings}-> same, applied to that sim, restarted
     POST /api/restart?world= {}       -> same, same settings, from day 1
     POST /api/keepalive?world= {}     -> same, session clock reset
+    POST /api/publish?world=          -> same, under the new id. 400 on a bad
+                     {"name": "..."}     name or an already-public sim, 409 if
+                                         the name is taken
 
-    The last five need X-Admin-Key when TOKENFARM_ADMIN_KEY is set. The play
+    The last six need X-Admin-Key when TOKENFARM_ADMIN_KEY is set. The play
     routes never do.
 
     Stream frames are {world, events, state, expires_in}. A countdown frame
     carries only {world, expires_in}; the last frame of a dying world is
-    {world, gone: true}.
+    {world, gone: true}, and of a published one {world, moved: <name>}.
 
     state = {day, time, phase, weather, money, barn, crops, plots, ascii,
              cursor, revision}
@@ -135,10 +176,18 @@ API
 Commands (send "help" for the in-game version)
     look | till <plots> | plant <crop> <plots> | water <plots>
     harvest <plots> | clear <plots> | sell <crop|all> [n] | log [n]
+    wait [n]                                  turn_based sims only
 
     <plots> accepts a cell (a1), a rectangle (a1-b3), "all", or a mix.
-    There is no "wait" -- nobody can fast-forward a shared clock. Call
-    sim.tick(farm) directly to drive the world synchronously in tests.
+
+    "wait" lets n hours pass, 1 by default and 168 at most, and is the only
+    way time moves in a turn_based sim. On a sim with its own clock it is
+    refused -- nobody can fast-forward a world other people are watching --
+    and "help" does not list it there. Call sim.tick(farm) directly to drive
+    any world synchronously in tests.
+
+    Choosing when to wake up is part of the game: an agent that waters at
+    dusk and sleeps until dawn spends nothing on the hours in between.
 
     "look" always renders the farmer's-eye view, so you can see what the
     model sees. The browser pane is the instrumented one.
